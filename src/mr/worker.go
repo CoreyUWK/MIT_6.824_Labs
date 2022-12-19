@@ -1,12 +1,17 @@
 package mr
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
+	"strconv"
+	"time"
 )
 
 /*
@@ -14,6 +19,14 @@ import (
 - mr-out-X file should contain one line per Reduce function output, "%v %v" format, called with the key and value
 - worker should put intermediate Map output in files in the current directory, where your worker can later read them as input to Reduce tasks
 */
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // Map functions return a slice of KeyValue.
 type KeyValue struct {
@@ -36,7 +49,7 @@ func getTask() (TaskReply, bool) {
 	// send the RPC request, wait for the reply.
 	ok := call("Coordinator.AssignTask", &args, &reply)
 	if ok {
-		fmt.Printf("reply.file %v\n", reply.File)
+		fmt.Printf("reply.file %s\n", reply.File)
 	} else {
 		fmt.Printf("call failed!\n")
 	}
@@ -53,61 +66,208 @@ func Worker(mapf func(string, string) []KeyValue,
 		// Get worker task
 		task, ok := getTask()
 		if !ok {
-			fmt.Println("Failed to get task from coordinator")
-			continue
+			log.Fatalln("Failed to connect and get task from coordinator")
+			break
 		}
 
 		switch task.Type {
 		case MapTask:
+			files, err := CallMapTask(&task, mapf)
+			if err != nil {
+				log.Fatalln("Failed to run map")
+				break
+			}
+
+			// Tell coordinator done map file and produced files
+			for _, file := range files {
+				task.Files = append(task.Files, file)
+			}
+			CallDone(&task)
 		case ReduceTask:
+			file, err := CallReduceTask(&task, reducef)
+			if err != nil {
+				log.Fatalln("Failed to run reduce")
+				break
+			}
+
+			// Tell coordinator done reduce files and produced file
+			task.Files = append(task.Files, file)
+			CallDone(&task)
 		case WaitTask:
+			time.Sleep(2 * time.Second)
 		default:
-
+			log.Fatalln("Unknown task type received from coordinator")
+			break
 		}
-
 	}
 
 	// uncomment to send the Example RPC to the coordinator.
 	//CallExample()
-	// send an RPC to the coordinator asking for a task.
-	CallRequestTask(mapf, reducef)
 }
 
-// RPC call to request coordinator for task
-func CallRequestTask(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
+// Process Map task
+func CallMapTask(task *TaskReply, mapf func(string, string) []KeyValue) ([]string, error) {
+	fileName := task.Files[0]
 
-	args := TaskArgs{}
-	reply := TaskReply{}
+	//
+	// read each input file,
+	// pass it to Map,
+	// accumulate the intermediate Map output.
+	//
 
-	// send the RPC request, wait for the reply.
-	ok := call("Coordinator.AssignTask", &args, &reply)
-	if ok {
-		fmt.Printf("reply.file %v\n", reply.File)
-	} else {
-		fmt.Printf("call failed!\n")
-		return
-	}
+	content, err := func(fileName string) ([]byte, error) {
+		// Read file
+		file, err := os.Open(fileName)
+		defer file.Close()
 
-	// Read file
-	file, err := os.Open(reply.File)
+		if err != nil {
+			log.Fatalf("cannot open %v", fileName)
+			return nil, errors.New("Can't open task file")
+		}
+		content, err := ioutil.ReadAll(file)
+		if err != nil {
+			log.Fatalf("cannot read %v", fileName)
+			return nil, errors.New("cannot read task file")
+		}
+
+		return content, nil
+	}(fileName)
 	if err != nil {
-		log.Fatalf("cannot open %v", reply.File)
+		return nil, err
 	}
-	content, err := ioutil.ReadAll(file)
-	if err != nil {
-		log.Fatalf("cannot read %v", reply.File)
-	}
-	file.Close()
 
 	// pass it to Map
-	kva := mapf(reply.File, string(content))
-	fmt.Println(kva)
+	intermediateKV := mapf(fileName, string(content))
+	//fmt.Println(intermediateKV)
 
-	// accumulate the intermediate Map output.
-	/*intermediate := []mr.KeyValue{}
-	intermediate = append(intermediate, kva...)
-	fmt.Println(intermediate)*/
+	// accumulate the intermediate Map output for n reducers
+	bucketKV := make([][]KeyValue, task.NReduce)
+	for _, kv := range intermediateKV {
+		bucket := ihash(kv.Key) % task.NReduce
+		bucketKV[bucket] = append(bucketKV[bucket], kv)
+	}
+
+	// Write out map results to temporary files for reducer
+	files := make([]string, task.NReduce)
+	for i := 0; i < task.NReduce; i++ {
+		oname := "mr-tmp-" + strconv.Itoa(task.TaskID) + "-" + strconv.Itoa(i)
+		files[i] = oname
+		err := func(oname string) error {
+			ofile, _ := os.Create(oname)
+			defer ofile.Close()
+
+			enc := json.NewEncoder(ofile)
+			for _, kvs := range bucketKV[i] {
+				err := enc.Encode(kvs)
+				if err != nil {
+					return errors.New("Can't write encode to json to file")
+				}
+			}
+
+			return nil
+		}(oname)
+		if err != nil {
+			return files, err
+		}
+	}
+
+	return files, nil
+}
+
+func sortIntermediateReduceFiles(files []string) ([]KeyValue, error) {
+	var kva []KeyValue
+	for _, filePath := range files {
+
+		// Merge all key/value pairs in worker intermediate files from one mapper
+		err := func(kva *[]KeyValue) error {
+			// Open file
+			file, err := os.Open(filePath)
+			defer file.Close()
+
+			if err != nil {
+				log.Fatalf("cannot read %v", filePath)
+				return errors.New("cannot read intermediate file")
+			}
+
+			// decode json
+			dec := json.NewDecoder(file)
+			for {
+				var kv KeyValue
+				if err := dec.Decode(&kv); err != nil {
+					log.Fatalln("failed to decode json file")
+					return errors.New("cannot read intermediate file")
+				}
+				*kva = append(*kva, kv)
+			}
+
+			return nil
+		}(&kva)
+
+		if err != nil {
+			return nil, errors.New("cannot read intermediate file")
+		}
+	}
+
+	// Order intermediate key/values pairs for reducer to work on a set
+	sort.Sort(ByKey(kva))
+
+	return kva, nil
+}
+
+// Process Reduce Task
+func CallReduceTask(task *TaskReply, reducef func(string, []string) string) (string, error) {
+	fileNames := task.Files
+	reduceFileNum := task.TaskID
+	intermediates, err := sortIntermediateReduceFiles(fileNames)
+
+	dir, _ := os.Getwd()
+	tempFile, err := ioutil.TempFile(dir, "mr-tmp-*")
+	if err != nil {
+		log.Fatalln("Failed to create temp file")
+		return "", err
+	}
+
+	//
+	// call Reduce on each distinct key in intermediate[],
+	// and print the result to mr-out-0.
+	//
+	i := 0
+	for i < len(intermediates) {
+		j := i + 1
+		for j < len(intermediates) && intermediates[j].Key == intermediates[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediates[k].Value)
+		}
+		output := reducef(intermediates[i].Key, values)
+		// Write output of reducer key sum(values) to temp file
+		fmt.Fprintf(tempFile, "%v %v\n", intermediates[i].Key, output)
+
+		i = j
+	}
+
+	tempFile.Close()
+
+	// TODO: Coordinator should rename file
+	fn := fmt.Sprintf("mr-out-%d", reduceFileNum)
+	os.Rename(tempFile.Name(), fn)
+
+	return fn, nil
+}
+
+// RPC to pass task completion results to coordinator
+func CallDone(task *TaskReply) {
+	args := DoneArgs{TempFiles: task.Files,
+		Type:   task.Type,
+		TaskID: task.TaskID}
+
+	response := false
+	ok := call("Coordinator.CallDone", &args, &response)
+	if !ok {
+		fmt.Println("Unable to CallDone on coordinator")
+	}
 }
 
 // example function to show how to make an RPC call to the coordinator.

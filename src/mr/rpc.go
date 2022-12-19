@@ -34,13 +34,19 @@ const (
 )
 
 type TaskArgs struct {
-	WorkerID int
 }
 
 type TaskReply struct {
 	Type    TaskType
-	File    string
+	Files   []string
 	NReduce int
+	TaskID  int
+}
+
+type DoneArgs struct {
+	TempFiles []string
+	Type      TaskType
+	TaskID    int
 }
 
 // Cook up a unique-ish UNIX-domain socket name
