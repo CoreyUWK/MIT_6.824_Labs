@@ -49,7 +49,7 @@ func getTask() (TaskReply, bool) {
 	// send the RPC request, wait for the reply.
 	ok := call("Coordinator.AssignTask", &args, &reply)
 	if ok {
-		fmt.Printf("reply.file %s\n", reply.File)
+		fmt.Printf("reply %d %d\n", reply.Type, reply.TaskID)
 	} else {
 		fmt.Printf("call failed!\n")
 	}
@@ -79,9 +79,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 
 			// Tell coordinator done map file and produced files
-			for _, file := range files {
-				task.Files = append(task.Files, file)
-			}
+			task.Files = append(task.Files, files...)
 			CallDone(&task)
 		case ReduceTask:
 			file, err := CallReduceTask(&task, reducef)
@@ -118,12 +116,12 @@ func CallMapTask(task *TaskReply, mapf func(string, string) []KeyValue) ([]strin
 	content, err := func(fileName string) ([]byte, error) {
 		// Read file
 		file, err := os.Open(fileName)
-		defer file.Close()
-
 		if err != nil {
 			log.Fatalf("cannot open %v", fileName)
 			return nil, errors.New("Can't open task file")
 		}
+		defer file.Close()
+
 		content, err := ioutil.ReadAll(file)
 		if err != nil {
 			log.Fatalf("cannot read %v", fileName)
@@ -160,7 +158,7 @@ func CallMapTask(task *TaskReply, mapf func(string, string) []KeyValue) ([]strin
 			for _, kvs := range bucketKV[i] {
 				err := enc.Encode(kvs)
 				if err != nil {
-					return errors.New("Can't write encode to json to file")
+					return errors.New("can't write encode to json to file")
 				}
 			}
 
@@ -182,12 +180,11 @@ func sortIntermediateReduceFiles(files []string) ([]KeyValue, error) {
 		err := func(kva *[]KeyValue) error {
 			// Open file
 			file, err := os.Open(filePath)
-			defer file.Close()
-
 			if err != nil {
 				log.Fatalf("cannot read %v", filePath)
 				return errors.New("cannot read intermediate file")
 			}
+			defer file.Close()
 
 			// decode json
 			dec := json.NewDecoder(file)
@@ -219,6 +216,10 @@ func CallReduceTask(task *TaskReply, reducef func(string, []string) string) (str
 	fileNames := task.Files
 	reduceFileNum := task.TaskID
 	intermediates, err := sortIntermediateReduceFiles(fileNames)
+	if err != nil {
+		log.Fatalln("Failed to read and sort intermediate files")
+		return "", err
+	}
 
 	dir, _ := os.Getwd()
 	tempFile, err := ioutil.TempFile(dir, "mr-tmp-*")
@@ -259,12 +260,8 @@ func CallReduceTask(task *TaskReply, reducef func(string, []string) string) (str
 
 // RPC to pass task completion results to coordinator
 func CallDone(task *TaskReply) {
-	args := DoneArgs{TempFiles: task.Files,
-		Type:   task.Type,
-		TaskID: task.TaskID}
-
-	response := false
-	ok := call("Coordinator.CallDone", &args, &response)
+	args := TaskArgs{}
+	ok := call("Coordinator.CallDone", task, &args)
 	if !ok {
 		fmt.Println("Unable to CallDone on coordinator")
 	}

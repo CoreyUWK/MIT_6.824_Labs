@@ -1,13 +1,33 @@
 package mr
 
 import (
-	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
+	"time"
 )
+
+/*
+mapFiles [T1, T2, T3]
+
+	w1 w2
+
+- file name
+- start time
+- taskID
+
+queue of tasks -> to process for map
+- if worker dies, how know task not completed
+*/
+type TaskInfo struct {
+	task      *TaskReply
+	startTime time.Time
+	timer     *time.Timer
+	done      chan struct{}
+}
 
 /*
 "main" routines for the coordinator and worker are in main/mrcoordinator.go and main/mrworker.go; don't change these files.
@@ -23,9 +43,10 @@ Workers:
 */
 type Coordinator struct {
 	// Your definitions here.
-	mapTasks    []string
-	reduceTasks []string
-	nReduce     int
+	taskQueue    chan *TaskReply // Queue of map or reduce tasks
+	tasksWaiting map[int]*TaskInfo
+	phase        TaskType // track phase of Map-Reduce
+	nReduce      int      // Store the number of reduce parameter from user
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -40,20 +61,47 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 
 // Respond to worker RPC with file name of an as-yet-unstarted map task
 func (c *Coordinator) AssignTask(args *TaskArgs, reply *TaskReply) error {
-	lastIdx := len(c.files) - 1
+	select {
+	case task := <-c.taskQueue: // Get map task from queue
+		reply.Files = task.Files
+		fmt.Printf("%s", task.Files[0])
+		reply.NReduce = task.NReduce
+		reply.TaskID = task.TaskID
+		reply.Type = task.Type
 
-	if lastIdx < 0 {
-		return errors.New("No more files for workers")
+		// Start task monitor
+		go c.MonitorTask(task)
+		fmt.Println("Started monitor")
+	default:
+		reply.Type = WaitTask
 	}
 
-	// Get file
-	reply.File = c.files[lastIdx]
-
-	// Remove last file
-	c.files[lastIdx] = ""
-	c.files = c.files[:lastIdx]
-
 	return nil
+}
+
+// Monitor an assigned task to worker
+func (c *Coordinator) MonitorTask(task *TaskReply) {
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+
+	fmt.Println("Montior Task")
+
+	c.tasksWaiting[task.TaskID] = &TaskInfo{
+		task:      task,
+		startTime: time.Now(),
+		timer:     timer,
+		done:      make(chan struct{}),
+	}
+
+	select {
+	case <-timer.C:
+		// If timer triggers then worker took too long and need to reassign
+		c.taskQueue <- task
+	case <-c.tasksWaiting[task.TaskID].done:
+	}
+
+	// Clear task info
+	c.tasksWaiting[task.TaskID] = nil
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -68,6 +116,27 @@ func (c *Coordinator) server() {
 		log.Fatal("listen error:", e)
 	}
 	go http.Serve(l, nil)
+}
+
+// Worker RPC calls when task done
+func (c *Coordinator) CallDone(args *TaskReply, response *TaskArgs) error {
+	fmt.Println("CallDone")
+	// Stop done worker monitor
+	c.tasksWaiting[args.TaskID].done <- struct{}{}
+
+	// Check if finished all tasks
+	/*switch c.phase {
+	case MapTask:
+		if len(c.taskQueue) == 0 && len(c.tasksWaiting) == 0 {
+			c.phase = ReduceTask
+
+		}
+	case ReduceTask:
+	}*/
+
+	fmt.Println(args.TaskID, args.Type, args.Files)
+
+	return nil
 }
 
 // main/mrcoordinator.go calls Done() periodically to find out
@@ -90,16 +159,24 @@ func (c *Coordinator) Done() bool {
 //
 //	each mapper needs to create nReduce intermediate files for consumption by the reduce tasks.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
-
 	// Your code here.
+	c := Coordinator{
+		taskQueue:    make(chan *TaskReply, len(files)),
+		tasksWaiting: make(map[int]*TaskInfo),
+		nReduce:      nReduce,
+		phase:        MapTask,
+	}
 
-	// Track files as tasks for workers to complete
-	c.mapTasks = files
-	c.nReduce = nReduce
-	/*for i, file := range files {
-		fmt.Println(i, file)
-	}*/
+	// Starting in map
+	for i, file := range files {
+		c.taskQueue <- &TaskReply{
+			Type:    MapTask,
+			Files:   []string{file},
+			NReduce: nReduce,
+			TaskID:  i,
+		}
+		// fmt.Println(i, file)
+	}
 
 	c.server()
 	return &c
