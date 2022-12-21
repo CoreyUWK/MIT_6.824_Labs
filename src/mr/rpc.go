@@ -52,3 +52,5 @@ func coordinatorSock() string {
 	s += strconv.Itoa(os.Getuid())
 	return s
 }
+
+var MapTmpFilePath = "mr-tmp/mr-tmp-"

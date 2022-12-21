@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -43,10 +44,16 @@ Workers:
 */
 type Coordinator struct {
 	// Your definitions here.
-	taskQueue    chan *TaskReply // Queue of map or reduce tasks
-	tasksWaiting map[int]*TaskInfo
+	taskQueue    chan *TaskReply // Queue of tasks
+	tasksWaiting []*TaskInfo
 	phase        TaskType // track phase of Map-Reduce
-	nReduce      int      // Store the number of reduce parameter from user
+
+	mu              *sync.Mutex
+	tempFiles       [][]string // To track reduce jobs per reducer
+	mapJobsCount    int
+	mapDoneCount    int
+	nReduce         int // Store the number of reduce parameter from user
+	reduceDoneCount int
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -62,12 +69,20 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 // Respond to worker RPC with file name of an as-yet-unstarted map task
 func (c *Coordinator) AssignTask(args *TaskArgs, reply *TaskReply) error {
 	select {
-	case task := <-c.taskQueue: // Get map task from queue
+	case task := <-c.taskQueue: // Get task from queue
 		reply.Files = task.Files
-		fmt.Printf("%s", task.Files[0])
+		fmt.Printf("%s\n", task.Files[0])
 		reply.NReduce = task.NReduce
 		reply.TaskID = task.TaskID
 		reply.Type = task.Type
+
+		// Place here to remove Race: says here but why if all threads access different array offset
+		c.tasksWaiting[task.TaskID] = &TaskInfo{
+			//task:      task,
+			//startTime: time.Now(),
+			//timer:     timer,
+			done: make(chan struct{}),
+		}
 
 		// Start task monitor
 		go c.MonitorTask(task)
@@ -85,13 +100,6 @@ func (c *Coordinator) MonitorTask(task *TaskReply) {
 	defer timer.Stop()
 
 	fmt.Println("Montior Task")
-
-	c.tasksWaiting[task.TaskID] = &TaskInfo{
-		task:      task,
-		startTime: time.Now(),
-		timer:     timer,
-		done:      make(chan struct{}),
-	}
 
 	select {
 	case <-timer.C:
@@ -120,19 +128,50 @@ func (c *Coordinator) server() {
 
 // Worker RPC calls when task done
 func (c *Coordinator) CallDone(args *TaskReply, response *TaskArgs) error {
-	fmt.Println("CallDone")
+	fmt.Printf("CallDone: %d %d %v\n", args.Type, args.TaskID, args.Files)
+
 	// Stop done worker monitor
 	c.tasksWaiting[args.TaskID].done <- struct{}{}
 
 	// Check if finished all tasks
-	/*switch c.phase {
+	switch c.phase {
 	case MapTask:
-		if len(c.taskQueue) == 0 && len(c.tasksWaiting) == 0 {
+		// Track completed map tasks output files
+		for _, filename := range args.Files {
+			var mapTaskID, reduceTaskID int
+			filepathFormat := MapTmpFilePath + "%d-%d"
+			fmt.Sscanf(filename, filepathFormat,
+				mapTaskID, reduceTaskID)
+
+			c.mu.Lock()
+			c.tempFiles[reduceTaskID] = append(c.tempFiles[reduceTaskID], filename)
+			c.mu.Unlock()
+		}
+
+		c.mu.Lock()
+		c.mapDoneCount++
+		if c.mapDoneCount >= c.mapJobsCount {
+			fmt.Printf("Is Done: %d %d %d\n", len(c.taskQueue), c.mapDoneCount, c.reduceDoneCount)
+			// Update to move to reduce phase
 			c.phase = ReduceTask
 
+			for i := 0; i < c.nReduce; i++ {
+				c.taskQueue <- &TaskReply{
+					Type:    ReduceTask,
+					Files:   c.tempFiles[i],
+					NReduce: 1,
+					TaskID:  i,
+				}
+			}
+			c.tempFiles = nil
 		}
+		c.mu.Unlock()
+
 	case ReduceTask:
-	}*/
+		c.mu.Lock()
+		c.reduceDoneCount++
+		c.mu.Unlock()
+	}
 
 	fmt.Println(args.TaskID, args.Type, args.Files)
 
@@ -149,6 +188,12 @@ func (c *Coordinator) Done() bool {
 	// simple way to implement this is to use the return value from call()
 	// if the worker fails to contact the coordinator, it can assume that the coordinator has exited because the job is done, and so the worker can terminate too
 	// Depending on your design, you might also find it helpful to have a "please exit" pseudo-task that the coordinator can give to workers
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.taskQueue) == 0 && len(c.tasksWaiting) == 0 && c.tempFiles == nil {
+		ret = true
+	}
 
 	return ret
 }
@@ -161,10 +206,15 @@ func (c *Coordinator) Done() bool {
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// Your code here.
 	c := Coordinator{
-		taskQueue:    make(chan *TaskReply, len(files)),
-		tasksWaiting: make(map[int]*TaskInfo),
-		nReduce:      nReduce,
-		phase:        MapTask,
+		taskQueue:       make(chan *TaskReply, len(files)*nReduce),
+		tasksWaiting:    make([]*TaskInfo, len(files)*nReduce),
+		nReduce:         nReduce,
+		phase:           MapTask,
+		tempFiles:       make([][]string, nReduce),
+		mu:              new(sync.Mutex),
+		mapJobsCount:    len(files),
+		mapDoneCount:    0,
+		reduceDoneCount: 0,
 	}
 
 	// Starting in map
@@ -175,6 +225,14 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			NReduce: nReduce,
 			TaskID:  i,
 		}
+
+		// Place here to remove Race: says here but why if all threads access different array offset
+		// c.tasksWaiting[i] = &TaskInfo{
+		// 	//task:      task,
+		// 	//startTime: time.Now(),
+		// 	//timer:     timer,
+		// 	done: make(chan struct{}),
+		// }
 		// fmt.Println(i, file)
 	}
 
