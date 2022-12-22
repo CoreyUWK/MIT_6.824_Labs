@@ -139,7 +139,7 @@ func (c *Coordinator) CallDone(args *TaskReply, response *TaskArgs) error {
 		// Track completed map tasks output files
 		for _, filename := range args.Files {
 			var mapTaskID, reduceTaskID int
-			filepathFormat := MapTmpFilePath + "%d-%d"
+			filepathFormat := MapTmpDir + MapTmpFile + "%d-%d"
 			fmt.Sscanf(filename, filepathFormat,
 				mapTaskID, reduceTaskID)
 

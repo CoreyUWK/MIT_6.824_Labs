@@ -53,4 +53,5 @@ func coordinatorSock() string {
 	return s
 }
 
-var MapTmpFilePath = "mr-tmp/mr-tmp-"
+var MapTmpDir = "mr-tmp/"
+var MapTmpFile = "mr-tmp-"

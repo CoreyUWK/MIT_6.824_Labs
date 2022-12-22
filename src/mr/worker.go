@@ -80,7 +80,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 
 			// Tell coordinator done map file and produced files
-			task.Files = append(task.Files, files...)
+			task.Files = append(task.Files, files[1:]...)
 			CallDone(&task)
 		case ReduceTask:
 			file, err := CallReduceTask(&task, reducef)
@@ -149,7 +149,7 @@ func CallMapTask(task *TaskReply, mapf func(string, string) []KeyValue) ([]strin
 	// Write out map results to temporary files for reducer
 	files := make([]string, task.NReduce)
 	for i := 0; i < task.NReduce; i++ {
-		oname := MapTmpFilePath + strconv.Itoa(task.TaskID) + "-" + strconv.Itoa(i)
+		oname := MapTmpDir + MapTmpFile + strconv.Itoa(task.TaskID) + "-" + strconv.Itoa(i)
 		files[i] = oname
 		err := func(oname string) error {
 			ofile, _ := os.Create(oname)
@@ -225,7 +225,7 @@ func CallReduceTask(task *TaskReply, reducef func(string, []string) string) (str
 	}
 
 	dir, _ := os.Getwd()
-	tempFile, err := ioutil.TempFile(dir, MapTmpFilePath+"*")
+	tempFile, err := ioutil.TempFile(dir+"/"+MapTmpDir, MapTmpFile+"*")
 	if err != nil {
 		log.Fatal("Failed to create temp file", err)
 		return "", err
