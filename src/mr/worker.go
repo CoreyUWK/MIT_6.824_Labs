@@ -74,13 +74,14 @@ func Worker(mapf func(string, string) []KeyValue,
 			log.Fatalln("Failed to connect and get task from coordinator")
 			break
 		}
-		if len(task.Files) == 0 {
-			log.Println("Got empty slice of files")
-			continue
-		}
 
 		switch task.Type {
 		case MapTask:
+			if len(task.Files) == 0 {
+				log.Println("Got empty slice of files")
+				continue
+			}
+
 			files, err := CallMapTask(&task, mapf)
 			if err != nil {
 				log.Fatalf("Failed to run map %s", err.Error())
@@ -91,6 +92,11 @@ func Worker(mapf func(string, string) []KeyValue,
 			task.Files = append(task.Files, files...)
 			CallDone(&task)
 		case ReduceTask:
+			if len(task.Files) == 0 {
+				log.Println("Got empty slice of files")
+				continue
+			}
+
 			file, err := CallReduceTask(&task, reducef)
 			if err != nil {
 				log.Fatalln("Failed to run reduce")
