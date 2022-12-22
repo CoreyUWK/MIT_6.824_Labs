@@ -210,7 +210,8 @@ func (c *Coordinator) Done() bool {
 	if DEBUG_MODE {
 		fmt.Printf("Done: %d %d %d\n", len(c.taskQueue), c.mapDoneCount, c.reduceDoneCount)
 	}
-	if len(c.taskQueue) == 0 && c.tempFiles == nil {
+	if len(c.taskQueue) == 0 && c.tempFiles == nil &&
+		c.mapDoneCount == c.mapJobsCount && c.reduceDoneCount == c.nReduce {
 		ret = true
 	}
 

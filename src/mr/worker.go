@@ -76,7 +76,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 		if len(task.Files) == 0 {
 			log.Println("Got empty slice of files")
-			break
+			continue
 		}
 
 		switch task.Type {
@@ -228,7 +228,7 @@ func CallReduceTask(task *TaskReply, reducef func(string, []string) string) (str
 	if DEBUG_MODE {
 		fmt.Printf("Reduce Files: %v\n", task.Files)
 	}
-	fileNames := task.Files[1:]
+	fileNames := task.Files
 	reduceFileNum := task.TaskID
 	intermediates, err := sortIntermediateReduceFiles(fileNames)
 	if err != nil {
