@@ -71,22 +71,26 @@ func (c *Coordinator) AssignTask(args *TaskArgs, reply *TaskReply) error {
 	select {
 	case task := <-c.taskQueue: // Get task from queue
 		reply.Files = task.Files
-		fmt.Printf("%s\n", task.Files[0])
+		if DEBUG_MODE {
+			fmt.Printf("Sending %d %d %v\n", task.Type, task.TaskID, task.Files)
+		}
 		reply.NReduce = task.NReduce
 		reply.TaskID = task.TaskID
 		reply.Type = task.Type
 
 		// Place here to remove Race: says here but why if all threads access different array offset
-		c.tasksWaiting[task.TaskID] = &TaskInfo{
+		/*c.tasksWaiting[task.TaskID] = &TaskInfo{
 			//task:      task,
 			//startTime: time.Now(),
 			//timer:     timer,
 			done: make(chan struct{}),
-		}
+		}*/
 
 		// Start task monitor
 		go c.MonitorTask(task)
-		fmt.Println("Started monitor")
+		if DEBUG_MODE {
+			fmt.Println("Started monitor")
+		}
 	default:
 		reply.Type = WaitTask
 	}
@@ -99,17 +103,23 @@ func (c *Coordinator) MonitorTask(task *TaskReply) {
 	timer := time.NewTimer(10 * time.Second)
 	defer timer.Stop()
 
-	fmt.Println("Montior Task")
+	if DEBUG_MODE {
+		fmt.Println("Montior Task")
+	}
 
 	select {
 	case <-timer.C:
 		// If timer triggers then worker took too long and need to reassign
 		c.taskQueue <- task
+		if DEBUG_MODE {
+			fmt.Printf("Putting task back into queue: %d %d %v\n",
+				task.TaskID, task.Type, task.Files)
+		}
 	case <-c.tasksWaiting[task.TaskID].done:
 	}
 
 	// Clear task info
-	c.tasksWaiting[task.TaskID] = nil
+	//c.tasksWaiting[task.TaskID] = nil
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -128,7 +138,9 @@ func (c *Coordinator) server() {
 
 // Worker RPC calls when task done
 func (c *Coordinator) CallDone(args *TaskReply, response *TaskArgs) error {
-	fmt.Printf("CallDone: %d %d %v\n", args.Type, args.TaskID, args.Files)
+	if DEBUG_MODE {
+		fmt.Printf("CallDone: %d %d %v\n", args.Type, args.TaskID, args.Files)
+	}
 
 	// Stop done worker monitor
 	c.tasksWaiting[args.TaskID].done <- struct{}{}
@@ -137,12 +149,13 @@ func (c *Coordinator) CallDone(args *TaskReply, response *TaskArgs) error {
 	switch c.phase {
 	case MapTask:
 		// Track completed map tasks output files
-		for _, filename := range args.Files {
+		for _, filename := range args.Files[1:] {
 			var mapTaskID, reduceTaskID int
-			filepathFormat := MapTmpDir + MapTmpFile + "%d-%d"
-			fmt.Sscanf(filename, filepathFormat,
-				mapTaskID, reduceTaskID)
-
+			filepathFormat := /*MapTmpDir + "/" +*/ MapTmpFile + "%d-%d"
+			fmt.Sscanf(filename, filepathFormat, &mapTaskID, &reduceTaskID)
+			if DEBUG_MODE {
+				fmt.Printf("Append Tmp: %s %s %d %d\n", filename, filepathFormat, mapTaskID, reduceTaskID)
+			}
 			c.mu.Lock()
 			c.tempFiles[reduceTaskID] = append(c.tempFiles[reduceTaskID], filename)
 			c.mu.Unlock()
@@ -150,12 +163,17 @@ func (c *Coordinator) CallDone(args *TaskReply, response *TaskArgs) error {
 
 		c.mu.Lock()
 		c.mapDoneCount++
-		if c.mapDoneCount >= c.mapJobsCount {
-			fmt.Printf("Is Done: %d %d %d\n", len(c.taskQueue), c.mapDoneCount, c.reduceDoneCount)
+		if c.mapDoneCount >= c.mapJobsCount && c.tempFiles != nil {
+			if DEBUG_MODE {
+				fmt.Printf("Is Done: %d %d %d\n", len(c.taskQueue), c.mapDoneCount, c.reduceDoneCount)
+			}
 			// Update to move to reduce phase
 			c.phase = ReduceTask
 
 			for i := 0; i < c.nReduce; i++ {
+				if DEBUG_MODE {
+					fmt.Printf("Putting reduce task: %d, %v\n", i, c.tempFiles[i])
+				}
 				c.taskQueue <- &TaskReply{
 					Type:    ReduceTask,
 					Files:   c.tempFiles[i],
@@ -173,8 +191,6 @@ func (c *Coordinator) CallDone(args *TaskReply, response *TaskArgs) error {
 		c.mu.Unlock()
 	}
 
-	fmt.Println(args.TaskID, args.Type, args.Files)
-
 	return nil
 }
 
@@ -191,7 +207,10 @@ func (c *Coordinator) Done() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(c.taskQueue) == 0 && len(c.tasksWaiting) == 0 && c.tempFiles == nil {
+	if DEBUG_MODE {
+		fmt.Printf("Done: %d %d %d\n", len(c.taskQueue), c.mapDoneCount, c.reduceDoneCount)
+	}
+	if len(c.taskQueue) == 0 && c.tempFiles == nil {
 		ret = true
 	}
 
@@ -217,8 +236,23 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		reduceDoneCount: 0,
 	}
 
+	for i := 0; i < len(files)*nReduce; i++ {
+		// Place here to remove Race: says here but why if all threads access different array offset
+		c.tasksWaiting[i] = &TaskInfo{
+			//task:      task,
+			//startTime: time.Now(),
+			//timer:     timer,
+			done: make(chan struct{}),
+		}
+	}
+
 	// Starting in map
 	for i, file := range files {
+		if DEBUG_MODE {
+			fmt.Printf("Putting Into Queue: map, %d, %d, %s\n",
+				i, nReduce, file)
+		}
+
 		c.taskQueue <- &TaskReply{
 			Type:    MapTask,
 			Files:   []string{file},
@@ -226,14 +260,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			TaskID:  i,
 		}
 
-		// Place here to remove Race: says here but why if all threads access different array offset
-		// c.tasksWaiting[i] = &TaskInfo{
-		// 	//task:      task,
-		// 	//startTime: time.Now(),
-		// 	//timer:     timer,
-		// 	done: make(chan struct{}),
+		// if DEBUG_MODE {
+		// 	// fmt.Println(i, file)
 		// }
-		// fmt.Println(i, file)
 	}
 
 	c.server()
