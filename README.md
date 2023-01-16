@@ -14,21 +14,23 @@ Map Tasks:
 - will send file path to worker which will perform map operation
 - 1:N files created
 
+```
 MapTasks     ReduceTasks
 File1   |         
 File2   | -- Reduce File 2 --> Out1,...,OutN  
 File3   |
       Barrier
    Wait for all maptasks to complete
+```
 
 Reduce Tasks:
 - partitions map results based on hash of key
 - each reducer will work on key space
 
-'''
+```
                  ReqTask
             Thread  |--- worker
 coordinator ...   <-|    ...
             Thread  |----worker
+```
 
-'''
