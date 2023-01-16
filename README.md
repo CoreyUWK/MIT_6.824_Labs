@@ -1,15 +1,31 @@
 # MIT_6.824_Labs
 Going through MIT 6.824 Distributed Systems Course Labs.
 
-ToDo:
-- encode intermediate files to json
-encoding/json package
-write:
- enc := json.NewEncoder(file)
-  for _, kv := ... {
-    err := enc.Encode(&kv)
-And use ioutil.TempFile to create a temporary file and os.Rename to atomically rename it.
+Lab1: MapReduce
+- code files in /mr directory
 
-- lock on coordinator strucutres
-- worker or RPC coordinator thread wait sleep
-- coordinator thread monitor workers by check if 10secs pass   
+1 coordinator runs <- RPC -> many workers
+- each worker will request a task from coordinator
+- coordinator handles each task request on a seperate thread
+- A monitor thread started per task request thread to check elapsed time of worker operation, if dies
+- use channels as a locked queue for inter-thread communication of tasks
+
+Map Tasks:
+- will send file path to worker which will perform map operation
+- 1:N files created
+
+MapTasks     ReduceTasks
+File1   |         
+File2   | -- Reduce File 2 --> Out1,...,OutN  
+File3   |
+      Barrier
+   Wait for all maptasks to complete
+
+Reduce Tasks:
+- partitions map results based on hash of key
+- each reducer will work on key space
+  
+                  ReqTask
+            Thread  |--- worker
+coordinator ...   <-|    ...
+            Thread  |----worker
