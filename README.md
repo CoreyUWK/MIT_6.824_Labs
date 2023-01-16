@@ -24,8 +24,10 @@ File3   |
 Reduce Tasks:
 - partitions map results based on hash of key
 - each reducer will work on key space
-  
-                  ReqTask
+
+<p>
+                 ReqTask
             Thread  |--- worker
 coordinator ...   <-|    ...
             Thread  |----worker
+<p>
